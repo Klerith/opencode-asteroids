@@ -145,6 +145,15 @@ class Comet {
     this.ttl = COMET_TTL[size];
     this.life = this.ttl;     // para parpadeo al final
     this.trailAcc = 0;        // acumulador para emitir estela
+
+    // Polígono irregular (como asteroide): solo borde, sin relleno
+    const n = randInt(8, 13);
+    this.verts = [];
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const r = this.radius * rand(0.6, 1.0);
+      this.verts.push([Math.cos(a) * r, Math.sin(a) * r]);
+    }
   }
 
   update(dt) {
@@ -181,22 +190,16 @@ class Comet {
 
     ctx.save();
     ctx.translate(this.x, this.y);
-
-    // Cabeza con glow
-    ctx.shadowColor = '#ffcc44';
-    ctx.shadowBlur  = 12;
-    ctx.fillStyle   = '#ffcc44';
+    ctx.rotate(this.rot);
+    ctx.strokeStyle = '#ffcc44';
+    ctx.lineWidth   = 1.5;
+    ctx.lineJoin    = 'round';
     ctx.beginPath();
-    ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Núcleo brillante
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#fff8d0';
-    ctx.beginPath();
-    ctx.arc(0, 0, this.radius * 0.4, 0, Math.PI * 2);
-    ctx.fill();
-
+    ctx.moveTo(this.verts[0][0], this.verts[0][1]);
+    for (let i = 1; i < this.verts.length; i++)
+      ctx.lineTo(this.verts[i][0], this.verts[i][1]);
+    ctx.closePath();
+    ctx.stroke();
     ctx.restore();
   }
 }
