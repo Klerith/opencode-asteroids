@@ -23,6 +23,40 @@ function pressed(code) {
   return val;
 }
 
+// ── Skins de la nave ──────────────────────────────────────────────────────────
+// Cada skin define su propia silueta (polígono cerrado, nariz hacia +x) y colores.
+// Se ciclan con la tecla S; la selección persiste en localStorage.
+const SKINS = [
+  {
+    name: 'Clásica',
+    color: '#fff',
+    flame: 'rgba(255, 130, 0, 0.85)',
+    shape: [[20, 0], [-12, -9], [-7, 0], [-12, 9]],
+  },
+  {
+    name: 'Caza',
+    color: '#7fbfff',
+    flame: 'rgba(120, 220, 255, 0.9)',
+    shape: [[22, 0], [-6, -7], [-14, -10], [-10, 0], [-14, 10], [-6, 7]],
+  },
+  {
+    name: 'Bicho nuclear',
+    color: '#7fff7f',
+    flame: 'rgba(180, 255, 120, 0.9)',
+    shape: [[18, 0], [4, -8], [-10, -12], [-14, -4], [-10, 0], [-14, 4], [-10, 12], [4, 8]],
+  },
+  {
+    name: 'Púrpura',
+    color: '#c87fff',
+    flame: 'rgba(255, 120, 220, 0.9)',
+    shape: [[18, 0], [6, -10], [-10, -10], [-14, 0], [-10, 10], [6, 10]],
+  },
+];
+
+let currentSkin = parseInt(localStorage.getItem('asteroids-skin'), 10);
+if (isNaN(currentSkin) || currentSkin < 0 || currentSkin >= SKINS.length) currentSkin = 0;
+let skinToast = 0;   // timer del aviso HUD al cambiar de skin
+
 // ── Utils ─────────────────────────────────────────────────────────────────────
 const wrap  = (v, max) => ((v % max) + max) % max;
 const dist  = (a, b)   => Math.hypot(a.x - b.x, a.y - b.y);
@@ -314,19 +348,20 @@ class Ship {
     // Parpadeo durante invencibilidad de reaparición
     if (this.invincible > 0 && Math.floor(this.invincible * 8) % 2 === 0) return;
 
+    const skin = SKINS[currentSkin];
+
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.rotate(this.angle);
-    ctx.strokeStyle = '#fff';
+    ctx.strokeStyle = skin.color;
     ctx.lineWidth   = 1.5;
     ctx.lineJoin    = 'round';
 
-    // Silueta clásica: triángulo con muesca trasera
+    // Silueta de la skin
     ctx.beginPath();
-    ctx.moveTo( 20,  0);   // nariz
-    ctx.lineTo(-12, -9);   // ala izquierda
-    ctx.lineTo( -7,  0);   // muesca trasera
-    ctx.lineTo(-12,  9);   // ala derecha
+    ctx.moveTo(skin.shape[0][0], skin.shape[0][1]);
+    for (let i = 1; i < skin.shape.length; i++)
+      ctx.lineTo(skin.shape[i][0], skin.shape[i][1]);
     ctx.closePath();
     ctx.stroke();
 
@@ -336,7 +371,7 @@ class Ship {
       ctx.moveTo(-8, -4);
       ctx.lineTo(-8 - rand(6, 14), 0);
       ctx.lineTo(-8,  4);
-      ctx.strokeStyle = 'rgba(255, 130, 0, 0.85)';
+      ctx.strokeStyle = skin.flame;
       ctx.stroke();
     }
 
@@ -477,6 +512,14 @@ function update(dt) {
     bullets.push(...ship.tryShoot());
   }
 
+  // Cambiar de skin (tecla S)
+  if (pressed('KeyS')) {
+    currentSkin = (currentSkin + 1) % SKINS.length;
+    localStorage.setItem('asteroids-skin', currentSkin);
+    skinToast = 2;
+  }
+  if (skinToast > 0) skinToast -= dt;
+
   ship.update(dt);
   bullets.forEach(b => b.update(dt));
   asteroids.forEach(a => a.update(dt));
@@ -565,17 +608,18 @@ function update(dt) {
 
 // ── Draw ──────────────────────────────────────────────────────────────────────
 function drawLifeIcon(x, y) {
+  // Icono de vida escalado, usa la silueta y color de la skin actual
+  const skin = SKINS[currentSkin];
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(-Math.PI / 2);
-  ctx.strokeStyle = '#fff';
+  ctx.strokeStyle = skin.color;
   ctx.lineWidth   = 1.2;
   ctx.lineJoin    = 'round';
   ctx.beginPath();
-  ctx.moveTo( 9,  0);
-  ctx.lineTo(-6, -5);
-  ctx.lineTo(-3,  0);
-  ctx.lineTo(-6,  5);
+  ctx.moveTo(skin.shape[0][0] * 0.45, skin.shape[0][1] * 0.45);
+  for (let i = 1; i < skin.shape.length; i++)
+    ctx.lineTo(skin.shape[i][0] * 0.45, skin.shape[i][1] * 0.45);
   ctx.closePath();
   ctx.stroke();
   ctx.restore();
@@ -609,6 +653,15 @@ function drawHUD() {
     ctx.fillRect(bx, by + 4, barW, barH);
     ctx.fillStyle = '#7fffd4';
     ctx.fillRect(bx, by + 4, barW * (ship.boost / POWERUP_BOOST_TIME), barH);
+  }
+
+  // Aviso al cambiar de skin
+  if (skinToast > 0) {
+    const alpha = Math.min(1, skinToast / 2);
+    ctx.fillStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
+    ctx.font = 'bold 22px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`SKIN: ${SKINS[currentSkin].name}`, W / 2, 56);
   }
 
 }
