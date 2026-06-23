@@ -118,6 +118,89 @@ class Asteroid {
   }
 }
 
+// ── Comet (Estrella Fugaz) ─────────────────────────────────────────────────────
+// Asteroide especial: muy rápido, con estela, TTL limitado. Se divide al morir.
+const COMET_RADII  = [0, 8, 14];      // tamaño 1 (hija) y 2 (grande)
+const COMET_SPEED  = 180;             // px/s (~5x asteroide tamaño 3)
+const COMET_TTL    = [0, 5, 8];        // segundos de vida por tamaño (hijas viven menos)
+const COMET_PERIOD = 15;             // cada 15s aparece una nueva
+const COMET_POINTS = [0, 100, 200];   // puntos por tamaño (hija=100, grande=200)
+const COMET_TRAIL_RATE = 40;          // partículas/segundo de estela
+
+class Comet {
+  constructor(x, y, size = 2) {
+    this.x    = x;
+    this.y    = y;
+    this.size = size;
+    this.radius = COMET_RADII[size];
+    this.dead = false;
+
+    const angle = rand(0, Math.PI * 2);
+    const speed = COMET_SPEED + rand(-20, 20);
+    this.vx = Math.cos(angle) * speed;
+    this.vy = Math.sin(angle) * speed;
+    this.rotSpeed = rand(-2.5, 2.5);
+    this.rot = rand(0, Math.PI * 2);
+
+    this.ttl = COMET_TTL[size];
+    this.life = this.ttl;     // para parpadeo al final
+    this.trailAcc = 0;        // acumulador para emitir estela
+  }
+
+  update(dt) {
+    this.x   = wrap(this.x + this.vx * dt, W);
+    this.y   = wrap(this.y + this.vy * dt, H);
+    this.rot += this.rotSpeed * dt;
+    this.ttl -= dt;
+    if (this.ttl <= 0) { this.dead = true; return; }
+
+    // Estela: emite partículas en el array global `particles`
+    this.trailAcc += dt * COMET_TRAIL_RATE;
+    while (this.trailAcc >= 1) {
+      this.trailAcc -= 1;
+      particles.push(new Particle(this.x, this.y, {
+        angle: Math.atan2(-this.vy, -this.vx) + rand(-0.3, 0.3),
+        speed: rand(10, 40),
+        life:  rand(0.25, 0.55),
+        color: '#ffcc44',
+      }));
+    }
+  }
+
+  split() {
+    if (this.size <= 1) return [];
+    return [
+      new Comet(this.x, this.y, this.size - 1),
+      new Comet(this.x, this.y, this.size - 1),
+    ];
+  }
+
+  draw() {
+    // Parpadeo en el último segundo de vida
+    if (this.ttl < 1 && Math.floor(this.ttl * 8) % 2 === 0) return;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // Cabeza con glow
+    ctx.shadowColor = '#ffcc44';
+    ctx.shadowBlur  = 12;
+    ctx.fillStyle   = '#ffcc44';
+    ctx.beginPath();
+    ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Núcleo brillante
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff8d0';
+    ctx.beginPath();
+    ctx.arc(0, 0, this.radius * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
 // ── PowerUp (Velocidad) ───────────────────────────────────────────────────────
 const POWERUP_DROP_CHANCE = 0.08;   // probabilidad de drop por asteroide destruido
 const POWERUP_BOOST_TIME  = 5;      // duración del boost en segundos
@@ -260,15 +343,16 @@ class Ship {
 
 // ── Partículas (explosión) ────────────────────────────────────────────────────
 class Particle {
-  constructor(x, y) {
+  constructor(x, y, opts = {}) {
     this.x  = x;
     this.y  = y;
-    const angle = rand(0, Math.PI * 2);
-    const speed = rand(30, 130);
+    const angle = (opts.angle !== undefined) ? opts.angle : rand(0, Math.PI * 2);
+    const speed = (opts.speed !== undefined) ? opts.speed : rand(30, 130);
     this.vx   = Math.cos(angle) * speed;
     this.vy   = Math.sin(angle) * speed;
-    this.life = rand(0.4, 1.1);
+    this.life = opts.life !== undefined ? opts.life : rand(0.4, 1.1);
     this.ttl  = this.life;
+    this.color = opts.color || '#fff';   // color base para la estela de cometa
     this.dead = false;
   }
 
@@ -280,8 +364,13 @@ class Particle {
   }
 
   draw() {
-    const alpha = this.ttl / this.life;
-    ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
+    const alpha = Math.max(0, this.ttl / this.life);
+    // Convierte color hex a rgba respetando alpha
+    const hex = this.color.replace('#', '');
+    const r = parseInt(hex.substr(0, 2), 16);
+    const g = parseInt(hex.substr(2, 2), 16);
+    const b = parseInt(hex.substr(4, 2), 16);
+    ctx.strokeStyle = `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(this.x, this.y);
@@ -291,10 +380,11 @@ class Particle {
 }
 
 // ── Estado del juego ──────────────────────────────────────────────────────────
-let ship, bullets, asteroids, particles, powerups;
+let ship, bullets, asteroids, particles, powerups, comets;
 let score, lives, level;
 let state;      // 'playing' | 'dead' | 'gameover'
 let deadTimer;
+let cometTimer;
 
 function spawnAsteroids(count) {
   const SAFE_DIST = 130;
@@ -314,10 +404,12 @@ function initGame() {
   asteroids = [];
   particles = [];
   powerups = [];
+  comets   = [];
   score  = 0;
   lives  = 3;
   level  = 1;
   state  = 'playing';
+  cometTimer = 0;
   spawnAsteroids(4);
 }
 
@@ -326,8 +418,20 @@ function nextLevel() {
   bullets   = [];
   particles = [];
   powerups  = [];
+  comets    = [];
+  cometTimer = 0;
   ship.reset();
   spawnAsteroids(3 + level);
+}
+
+function spawnComet() {
+  const SAFE_DIST = 130;
+  let x, y;
+  do {
+    x = rand(0, W);
+    y = rand(0, H);
+  } while (Math.hypot(x - ship.x, y - ship.y) < SAFE_DIST);
+  comets.push(new Comet(x, y, 2));
 }
 
 function explode(x, y, count = 8) {
@@ -375,10 +479,19 @@ function update(dt) {
   asteroids.forEach(a => a.update(dt));
   particles.forEach(p => p.update(dt));
   powerups.forEach(p => p.update(dt));
+  comets.forEach(c => c.update(dt));
+
+  // Spawn periódico de estrella fugaz
+  cometTimer += dt;
+  if (cometTimer >= COMET_PERIOD) {
+    cometTimer = 0;
+    spawnComet();
+  }
 
   bullets   = bullets.filter(b => !b.dead);
   particles = particles.filter(p => !p.dead);
   powerups  = powerups.filter(p => !p.dead);
+  comets    = comets.filter(c => !c.dead);
 
   // Bala vs asteroide
   const newAsteroids = [];
@@ -395,12 +508,39 @@ function update(dt) {
     }
   }
   asteroids = asteroids.filter(a => !a.dead).concat(newAsteroids);
+
+  // Bala vs cometa (estrella fugaz)
+  const newComets = [];
+  for (const b of bullets) {
+    for (const c of comets) {
+      if (!c.dead && !b.dead && dist(b, c) < c.radius) {
+        b.dead = true;
+        c.dead = true;
+        score += COMET_POINTS[c.size];
+        // Explosión amarilla de la fugaz
+        for (let i = 0; i < c.size * 6; i++)
+          particles.push(new Particle(c.x, c.y, { color: '#ffcc44', life: rand(0.3, 0.8) }));
+        newComets.push(...c.split());
+      }
+    }
+  }
+  comets = comets.filter(c => !c.dead).concat(newComets);
   bullets   = bullets.filter(b => !b.dead);
 
   // Nave vs asteroide
   if (ship.invincible <= 0) {
     for (const a of asteroids) {
       if (dist(ship, a) < ship.radius + a.radius * 0.82) {
+        killShip();
+        break;
+      }
+    }
+  }
+
+  // Nave vs cometa (igual que asteroide: daña la nave)
+  if (!ship.dead && ship.invincible <= 0) {
+    for (const c of comets) {
+      if (dist(ship, c) < ship.radius + c.radius * 0.82) {
         killShip();
         break;
       }
@@ -486,6 +626,7 @@ function draw() {
 
   particles.forEach(p => p.draw());
   asteroids.forEach(a => a.draw());
+  comets.forEach(c => c.draw());
   powerups.forEach(p => p.draw());
   bullets.forEach(b => b.draw());
   ship.draw();
