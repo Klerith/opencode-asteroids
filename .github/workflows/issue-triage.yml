@@ -1,0 +1,268 @@
+name: issue-triage
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+      id-token: write
+    timeout-minutes: 10
+    env:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install opencode
+        shell: bash
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> $GITHUB_PATH
+
+      - name: Exchange OIDC for app token
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_resp=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=opencode-github-action")
+          oidc_jwt=$(printf '%s' "$oidc_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")
+          app_resp=$(curl -sS -X POST https://api.opencode.ai/exchange_github_app_token \
+            -H "Authorization: Bearer $oidc_jwt")
+          if ! printf '%s' "$app_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('token')" 2>/dev/null; then
+            echo "::error::App token exchange failed: $app_resp"
+            exit 1
+          fi
+          app_token=$(printf '%s' "$app_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+          echo "::add-mask::$app_token"
+          echo "GH_TOKEN=$app_token" >> $GITHUB_ENV
+          printf '%s' "$app_token" > /tmp/app_token
+
+      - name: Fetch issue
+        shell: bash
+        run: |
+          gh issue view ${{ github.event.issue.number }} --json number,title,body > /tmp/issue.json
+          echo "::group::Issue JSON"
+          cat /tmp/issue.json
+          echo "::endgroup::"
+
+      - name: Build prompt
+        shell: bash
+        run: |
+          cat > /tmp/build_prompt.py <<'PY'
+          import json
+          with open("/tmp/issue.json") as f:
+              issue = json.load(f)
+          title = issue.get("title", "")
+          body = issue.get("body", "") or ""
+          template = """Eres el agente de triage del repositorio "03-asteroids", un clon de Asteroids en JavaScript vanilla (sin dependencias, sin bundler, sin build). Lee los archivos AGENTS.md y game.js del repositorio actual para entender el proyecto antes de clasificar.
+
+          Se acaba de abrir un issue. Tu tarea es clasificarlo y reformatear su cuerpo.
+
+          Título del issue:
+          __TITLE__
+
+          Cuerpo actual del issue:
+          -----
+          __BODY__
+          -----
+
+          Devuelve ÚNICAMENTE un objeto JSON válido, como texto plano, sin texto adicional, sin explicaciones, sin fences markdown (sin bloques ```). Escribe también este mismo JSON en el archivo /tmp/triage_result.json.
+
+          El JSON debe tener exactamente esta forma:
+
+          {
+            "labels": ["<etiqueta1>", "<etiqueta2>"],
+            "body": "<nuevo cuerpo en markdown, en español>"
+          }
+
+          REGLAS PARA "labels":
+          - Elige entre 1 y 2 etiquetas de este conjunto permitido: bug, enhancement, question, documentation, needs-triage.
+          - bug: error, fallo o comportamiento incorrecto.
+          - enhancement: mejora o nueva funcionalidad.
+          - question: duda o pedido de ayuda.
+          - documentation: problema o mejora de la documentación.
+          - needs-triage: ambiguo o no clasificable.
+          - No inventes etiquetas fuera del conjunto. Si dudas, usa needs-triage.
+
+          REGLAS PARA "body" (markdown, en español):
+          1. "## Resumen": resumen conciso del problema (1-3 oraciones).
+          2. "## Información relevante": indica
+             - Área probable del código (ej. game.js: clase Ship, función update). Si no aplica, di "N/A".
+             - Severidad sugerida: baja | media | alta.
+             - Pasos de reproducción esperados, si aplica. Si no hay información suficiente, di "Falta información para determinar pasos de reproducción."
+          3. "## Descripción": versión reformateada y normalizada del contenido del usuario. Preserva los hechos, no inventes detalles, corrige el formato markdown (encabezados, listas, código).
+          4. Un separador exactamente: ---
+          5. "_Texto original del issue_" seguido del texto ORIGINAL del usuario citado línea por línea con "> ". Preserva el texto exactamente, sin modificar ni traducir.
+
+          IMPORTANTE:
+          - No inventes detalles técnicos que no estén en el issue.
+          - El body debe ser markdown válido.
+          - No incluyas el título dentro del body.
+          - Devuelve solo el JSON, nada más.
+          """
+          prompt = template.replace("__TITLE__", title).replace("__BODY__", body)
+          with open("/tmp/prompt.txt", "w") as f:
+              f.write(prompt)
+          PY
+          python3 /tmp/build_prompt.py
+
+      - name: Run opencode
+        shell: bash
+        run: |
+          opencode run "$(cat /tmp/prompt.txt)" \
+            --model opencode-go/glm-5.2 \
+            --format json \
+            --dangerously-skip-permissions \
+            > /tmp/events.ndjson 2> /tmp/opencode.log
+          echo "::group::opencode log (last 40 lines)"
+          tail -n 40 /tmp/opencode.log || true
+          echo "::endgroup::"
+
+      - name: Parse and validate result
+        shell: bash
+        run: |
+          cat > /tmp/parse.py <<'PY'
+          import json, re, sys, os
+
+          allowed = ["bug", "enhancement", "question", "documentation", "needs-triage"]
+          allowed_set = set(allowed)
+
+          text_parts = []
+          try:
+              with open("/tmp/events.ndjson") as f:
+                  for line in f:
+                      line = line.strip()
+                      if not line:
+                          continue
+                      try:
+                          ev = json.loads(line)
+                      except Exception:
+                          continue
+                      if not isinstance(ev, dict):
+                          continue
+                      props = ev.get("properties", ev)
+                      if not isinstance(props, dict):
+                          continue
+                      part = props.get("part")
+                      if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                          text_parts.append(part["text"])
+          except FileNotFoundError:
+              pass
+
+          raw = ""
+          if os.path.exists("/tmp/triage_result.json"):
+              try:
+                  with open("/tmp/triage_result.json") as f:
+                      raw = f.read()
+              except Exception:
+                  raw = ""
+
+          if not raw.strip() and text_parts:
+              raw = "".join(text_parts)
+
+          if not raw.strip():
+              print("::warning::opencode no produjo salida; se omite la edición del issue")
+              sys.exit(0)
+
+          m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.S)
+          if m:
+              candidate = m.group(1)
+          else:
+              s = raw.find("{")
+              e = raw.rfind("}")
+              if s != -1 and e != -1 and e > s:
+                  candidate = raw[s:e + 1]
+              else:
+                  candidate = raw
+
+          try:
+              data = json.loads(candidate)
+          except Exception as ex:
+              print(f"::warning::no se pudo parsear el JSON ({ex}); se omite la edición del issue")
+              sys.exit(0)
+
+          labels = data.get("labels")
+          if isinstance(labels, str):
+              labels = [labels]
+          if not isinstance(labels, list):
+              labels = []
+          labels = [l.strip() for l in labels if isinstance(l, str) and l.strip() in allowed_set]
+          if not labels:
+              labels = ["needs-triage"]
+
+          body = data.get("body")
+          if not isinstance(body, str) or not body.strip():
+              print("::warning::body vacío; se omite la edición del issue")
+              sys.exit(0)
+
+          with open("/tmp/body.md", "w") as f:
+              f.write(body)
+          with open("/tmp/labels.csv", "w") as f:
+              f.write(",".join(labels))
+
+          print(f"Labels: {labels}")
+          print(f"Body length: {len(body)}")
+          PY
+          python3 /tmp/parse.py
+
+      - name: Apply labels and body
+        if: success()
+        shell: bash
+        run: |
+          if [ ! -f /tmp/body.md ]; then
+            echo "No hay resultado válido; se omite la edición del issue"
+            exit 0
+          fi
+          labels=$(cat /tmp/labels.csv)
+          for l in ${labels//,/ }; do
+            case "$l" in
+              bug) color=d73a4a ;;
+              enhancement) color=a2eeef ;;
+              question) color=d876e3 ;;
+              documentation) color=0075ca ;;
+              needs-triage) color=fbca04 ;;
+              *) color=ededed ;;
+            esac
+            gh label create "$l" --color "$color" --force 2>/dev/null || true
+          done
+          gh issue edit ${{ github.event.issue.number }} \
+            --body-file /tmp/body.md \
+            --add-label "$labels"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-issue-${{ github.event.issue.number }}-${{ github.run_id }}
+          path: |
+            /tmp/issue.json
+            /tmp/prompt.txt
+            /tmp/events.ndjson
+            /tmp/opencode.log
+            /tmp/body.md
+            /tmp/labels.csv
+            /tmp/triage_result.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Revoke app token
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/app_token ]; then
+            token=$(cat /tmp/app_token)
+            curl -sS -X DELETE https://api.github.com/installation/token \
+              -H "Authorization: Bearer $token" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              || true
+            rm -f /tmp/app_token
+          fi
