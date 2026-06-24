@@ -51,11 +51,24 @@ const SKINS = [
     flame: 'rgba(255, 120, 220, 0.9)',
     shape: [[18, 0], [6, -10], [-10, -10], [-14, 0], [-10, 10], [6, 10]],
   },
+  {
+    name: 'Morada',
+    color: '#9d4edd',
+    flame: 'rgba(220, 100, 255, 0.9)',
+    shape: [[18, 0], [6, -10], [-10, -10], [-14, 0], [-10, 10], [6, 10]],
+    scale: 2,        // nave 2x más grande que la original
+    scoreMult: 2,    // el jugador recibe el doble de puntos
+  },
 ];
 
 let currentSkin = parseInt(localStorage.getItem('asteroids-skin'), 10);
 if (isNaN(currentSkin) || currentSkin < 0 || currentSkin >= SKINS.length) currentSkin = 0;
 let skinToast = 0;   // timer del aviso HUD al cambiar de skin
+
+// Multiplicador de puntos de la skin activa (la Morada otorga x2)
+const skinScoreMult = () => SKINS[currentSkin].scoreMult || 1;
+// Escala visual/de colisión de la skin activa (la Morada es 2x)
+const skinScale = () => SKINS[currentSkin].scale || 1;
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
 const wrap  = (v, max) => ((v % max) + max) % max;
@@ -330,8 +343,16 @@ class PowerUp {
 }
 
 // ── Ship ──────────────────────────────────────────────────────────────────────
+const SHIP_BASE_RADIUS = 12;   // radio de colisión base; escala con la skin activa
+
 class Ship {
   constructor() { this.reset(); }
+
+  // Radio de colisión dinámico según la escala de la skin (la Morada es 2x)
+  get radius() { return SHIP_BASE_RADIUS * skinScale(); }
+
+  // Radio del escudo dinámico: crece con la nave para seguir cubriéndola
+  get shieldRadius() { return SHIELD_RADIUS * skinScale(); }
 
   reset() {
     this.x      = W / 2;
@@ -339,7 +360,6 @@ class Ship {
     this.angle  = -Math.PI / 2;
     this.vx     = 0;
     this.vy     = 0;
-    this.radius = 12;
     this.thrusting     = false;
     this.invincible    = 3;
     this.shootCooldown = 0;
@@ -384,7 +404,7 @@ class Ship {
   tryShoot() {
     if (this.shootCooldown > 0 || this.dead) return [];
     this.shootCooldown = 0.2;
-    const NOSE = 21;
+    const NOSE = 21 * skinScale();   // la nariz escala con la nave (Morada 2x)
     const ox = this.x + Math.cos(this.angle) * NOSE;
     const oy = this.y + Math.sin(this.angle) * NOSE;
     if (this.triple > 0) {
@@ -409,16 +429,17 @@ class Ship {
       const alpha = (this.shield < 1 ? Math.max(0.2, this.shield) : 1) * pulse;
       ctx.save();
       ctx.translate(this.x, this.y);
+      const sr = this.shieldRadius;
       ctx.strokeStyle = `rgba(95, 200, 255, ${alpha.toFixed(2)})`;
       ctx.lineWidth   = 2;
       ctx.beginPath();
-      ctx.arc(0, 0, SHIELD_RADIUS, 0, Math.PI * 2);
+      ctx.arc(0, 0, sr, 0, Math.PI * 2);
       ctx.stroke();
       // Halo interior sutil
       ctx.strokeStyle = `rgba(95, 200, 255, ${(alpha * 0.35).toFixed(2)})`;
       ctx.lineWidth   = 1;
       ctx.beginPath();
-      ctx.arc(0, 0, SHIELD_RADIUS - 4, 0, Math.PI * 2);
+      ctx.arc(0, 0, sr - 4, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }
@@ -427,10 +448,12 @@ class Ship {
     if (this.invincible > 0 && Math.floor(this.invincible * 8) % 2 === 0) return;
 
     const skin = SKINS[currentSkin];
+    const scale = skinScale();
 
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.rotate(this.angle);
+    ctx.scale(scale, scale);
     ctx.strokeStyle = skin.color;
     ctx.lineWidth   = 1.5;
     ctx.lineJoin    = 'round';
@@ -626,7 +649,7 @@ function update(dt) {
       if (!a.dead && !b.dead && dist(b, a) < a.radius) {
         b.dead = true;
         a.dead = true;
-        score += POINTS[a.size];
+        score += POINTS[a.size] * skinScoreMult();
         explode(a.x, a.y, a.size * 5);
         if (Math.random() < POWERUP_DROP_CHANCE) powerups.push(spawnRandomPowerUp(a.x, a.y));
         newAsteroids.push(...a.split());
@@ -642,7 +665,7 @@ function update(dt) {
       if (!c.dead && !b.dead && dist(b, c) < c.radius) {
         b.dead = true;
         c.dead = true;
-        score += COMET_POINTS[c.size];
+        score += COMET_POINTS[c.size] * skinScoreMult();
         // Explosión amarilla de la fugaz
         for (let i = 0; i < c.size * 6; i++)
           particles.push(new Particle(c.x, c.y, { color: '#ffcc44', life: rand(0.3, 0.8) }));
@@ -657,9 +680,9 @@ function update(dt) {
   if (ship.shield > 0 && !ship.dead) {
     const splits = [];
     for (const a of asteroids) {
-      if (!a.dead && dist(ship, a) < SHIELD_RADIUS + a.radius * 0.82) {
+      if (!a.dead && dist(ship, a) < ship.shieldRadius + a.radius * 0.82) {
         a.dead = true;
-        score += POINTS[a.size];
+        score += POINTS[a.size] * skinScoreMult();
         explode(a.x, a.y, a.size * 5);
         if (Math.random() < POWERUP_DROP_CHANCE) powerups.push(spawnRandomPowerUp(a.x, a.y));
         splits.push(...a.split());
@@ -672,9 +695,9 @@ function update(dt) {
   if (ship.shield > 0 && !ship.dead) {
     const splits = [];
     for (const c of comets) {
-      if (!c.dead && dist(ship, c) < SHIELD_RADIUS + c.radius * 0.82) {
+      if (!c.dead && dist(ship, c) < ship.shieldRadius + c.radius * 0.82) {
         c.dead = true;
-        score += COMET_POINTS[c.size];
+        score += COMET_POINTS[c.size] * skinScoreMult();
         for (let i = 0; i < c.size * 6; i++)
           particles.push(new Particle(c.x, c.y, { color: '#ffcc44', life: rand(0.3, 0.8) }));
         splits.push(...c.split());
@@ -741,6 +764,15 @@ function drawHUD() {
 
   ctx.textAlign = 'left';
   ctx.fillText(`SCORE  ${score}`, 14, 26);
+
+  // Indicador del multiplicador de puntos de la skin activa (Morada = x2)
+  const mult = skinScoreMult();
+  if (mult > 1) {
+    const w = ctx.measureText(`SCORE  ${score}  `).width;
+    ctx.fillStyle = '#c87fff';
+    ctx.fillText(`x${mult} PUNTOS`, 14 + w, 26);
+    ctx.fillStyle = '#fff';
+  }
 
   ctx.textAlign = 'center';
   ctx.fillText(`NIVEL ${level}`, W / 2, 26);
